@@ -2,32 +2,27 @@
 #include <WiFi.h>
 #include <WebServer.h>
 
-// --- Wi-Fi Credentials ---
 const char* AP_SSID = "NeoNet_ESP32";
 const char* AP_PASS = "12345678";
 WebServer server(80);
 
-// --- Hardware Pins ---
 const int TURBIDITY_PIN = 32;
 const int TDS_PIN = 34;
 
-const int FLOW_MAIN_PIN = 27; // FS-01: Main Header Inlet
-const int FLOW_A1_PIN   = 14; // FS-02: Branch A Inlet
-const int FLOW_A2_PIN   = 25; // FS-03: Branch A Downstream
-const int FLOW_B1_PIN   = 26; // FS-04: Branch B Inlet
-const int FLOW_B2_PIN   = 33; // FS-05: Branch B Downstream
+const int FLOW_MAIN_PIN = 27; 
+const int FLOW_A1_PIN   = 14; 
+const int FLOW_A2_PIN   = 25; 
+const int FLOW_B1_PIN   = 26; 
+const int FLOW_B2_PIN   = 33; 
 
-// --- Solenoid Valve Pins (Relay Module Required) ---
-const int VALVE1_PIN = 19; // VL-01: Branch A Cutoff
-const int VALVE2_PIN = 18; // VL-02: Branch B Cutoff
+const int VALVE1_PIN = 19; 
+const int VALVE2_PIN = 18; 
 bool isValve1Open = false;
 bool isValve2Open = false;
 
-// --- Calibration Variables ---
 const float FLOW_CALIBRATION = 7.5; 
 float TDS_CALIBRATION = 2.0;        
 
-// --- Volatile Pulse Counters ---
 volatile unsigned long pulse_main = 0;
 volatile unsigned long pulse_a1 = 0;
 volatile unsigned long pulse_a2 = 0;
@@ -54,7 +49,6 @@ float calculateFlowMLs(unsigned long pulses, unsigned long elapsedTime) {
   return (flowRate_L_min * 1000.0) / 60.0;
 }
 
-// --- Dual Valve Control API ---
 void handleValveControl() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
   
@@ -106,7 +100,6 @@ void setup() {
   Serial.begin(115200);
   analogReadResolution(12);
 
-  // Initialize Relays as LOW (Valves Closed) for safety
   pinMode(VALVE1_PIN, OUTPUT); digitalWrite(VALVE1_PIN, LOW);
   pinMode(VALVE2_PIN, OUTPUT); digitalWrite(VALVE2_PIN, LOW);
 
@@ -122,10 +115,8 @@ void setup() {
 
   previousMillis = millis();
   
-  // Start Access Point
   WiFi.softAP(AP_SSID, AP_PASS);
   
-  // Register Endpoints
   server.on("/data", HTTP_GET, handleData);
   server.on("/valve", HTTP_GET, handleValveControl); 
   

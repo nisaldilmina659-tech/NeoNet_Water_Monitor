@@ -1,4 +1,7 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:firebase_database/firebase_database.dart'; // Added Firebase
+
 import '../views/dashboard_view.dart';
 import '../views/alerts_view.dart';
 import '../views/sensors_view.dart';
@@ -13,12 +16,50 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int _selectedIndex = 0;
 
-  // 1. Updated the views list to only contain the 3 active screens
+  // --- New Variables for Live Clock ---
+  StreamSubscription<DatabaseEvent>? _timeSub;
+  int _currentTimestamp = 0;
+
   final List<Widget> _views = [
     const DashboardView(),
     const SensorsView(),
     const AlertsView(),
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    _setupTimeListener();
+  }
+
+  @override
+  void dispose() {
+    _timeSub?.cancel();
+    super.dispose();
+  }
+
+  // --- Firebase Listener for the Clock ---
+  void _setupTimeListener() {
+    final db = FirebaseDatabase.instance.ref();
+
+    _timeSub = db.child('sensors/current/timestamp').onValue.listen((event) {
+      if (event.snapshot.value != null) {
+        setState(() {
+          _currentTimestamp = (event.snapshot.value as num).toInt();
+        });
+      }
+    });
+  }
+
+  // --- Timestamp Formatter Function ---
+  String formatFirebaseTimestamp(int unixTimestamp) {
+    if (unixTimestamp == 0) return "SYNCING TIME...";
+
+    DateTime date = DateTime.fromMillisecondsSinceEpoch(unixTimestamp * 1000);
+    // Pads minutes with a leading zero if less than 10 (e.g., 09 instead of 9)
+    String minute = date.minute.toString().padLeft(2, '0');
+    return "${date.month}/${date.day}/${date.year} ${date.hour}:$minute";
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -39,7 +80,6 @@ class _HomeShellState extends State<HomeShell> {
                 const Divider(),
                 const SizedBox(height: 16),
 
-                // 2. Updated Nav Buttons (ALERTS is now index 2)
                 _buildNavButton('DASHBOARD', 0),
                 _buildNavButton('SENSORS', 1),
                 _buildNavButton('ALERTS', 2),
@@ -159,8 +199,11 @@ class _HomeShellState extends State<HomeShell> {
             ],
           ),
           const Spacer(),
-          const Text('NETWORK UTC ', style: TextStyle(fontSize: 11, color: Colors.grey)),
-          const Text('JUL 17, 2026 08:53:59', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+          const Text('NETWORK SYNC ', style: TextStyle(fontSize: 11, color: Colors.grey)),
+
+          // --- Replaced the hardcoded string with the live formatter ---
+          Text(formatFirebaseTimestamp(_currentTimestamp), style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+
           const VerticalDivider(indent: 20, endIndent: 20, width: 32),
           const Text('OPERATOR: ', style: TextStyle(fontSize: 11, color: Colors.grey)),
           const Text('SYS_ADMIN', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),

@@ -9,11 +9,9 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  // Controllers to read the text input
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
 
-  // Variable to hold the error message if login fails
   String? _errorMessage;
 
   @override
@@ -24,11 +22,9 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   void _handleLogin() {
-    // Check if the credentials match our secure operator account
     if (_emailController.text.trim() == 'NEONET' && _passwordController.text == 'admin123') {
       Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const HomeShell()));
     } else {
-      // Trigger a UI update to show the error
       setState(() {
         _errorMessage = 'ACCESS DENIED: Invalid email or password.';
       });
@@ -76,7 +72,6 @@ class _LoginScreenState extends State<LoginScreen> {
                 const SizedBox(height: 16),
                 _buildTextField('PASSWORD', 'admin123', true, _passwordController),
 
-                // Dynamically show the error message if it exists
                 if (_errorMessage != null) ...[
                   const SizedBox(height: 16),
                   Container(
@@ -116,7 +111,6 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
-  // Updated to accept the specific controller for each field
   Widget _buildTextField(String label, String hint, bool isObscure, TextEditingController controller) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,

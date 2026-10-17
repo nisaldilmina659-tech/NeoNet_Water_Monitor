@@ -1,7 +1,17 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'firebase_options.dart';
 import 'screens/login_screen.dart';
 
-void main() {
+void main() async {
+  // Required so Flutter can talk to native code before the app starts
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize the Firebase connection
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform,
+  );
+
   runApp(const NeoNetApp());
 }
 
@@ -18,10 +28,10 @@ class NeoNetApp extends StatelessWidget {
         cardColor: const Color(0xFF0D1722),
         dividerColor: const Color(0xFF162535),
         colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF00A3FF),
-          secondary: Color(0xFF00E676),
-          error: Color(0xFFFF1744),
-          surface: Color(0xFF0D1722),
+          primary: const Color(0xFF00A3FF),
+          secondary: const Color(0xFF00E676),
+          error: const Color(0xFFFF1744),
+          surface: const Color(0xFF0D1722),
         ),
         textTheme: const TextTheme(
           bodyLarge: TextStyle(

@@ -1,7 +1,6 @@
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
+import 'package:firebase_database/firebase_database.dart';
 
 class AlertsView extends StatefulWidget {
   const AlertsView({super.key});
@@ -11,102 +10,217 @@ class AlertsView extends StatefulWidget {
 }
 
 class _AlertsViewState extends State<AlertsView> {
-  Timer? _timer;
+  StreamSubscription<DatabaseEvent>? _sensorSub;
+  StreamSubscription<DatabaseEvent>? _alertsSub; // NEW: Listener for saved alerts
   bool isOnline = false;
 
-  // Flow Variables for Leak Detection
   double flowA1 = 0.0;
   double flowA2 = 0.0;
   double flowB1 = 0.0;
   double flowB2 = 0.0;
   static const double leakThreshold = 5.0;
 
-  // Water Quality Variables
   String turbStatus = "AWAITING DATA";
   String tdsStatus = "AWAITING DATA";
   int tdsPPM = 0;
 
+  // This list now mirrors the permanent database in Firebase
+  List<Map<String, dynamic>> _persistentAlerts = [];
+
   @override
   void initState() {
     super.initState();
-    // Poll the ESP32 for active conditions
-    _timer = Timer.periodic(const Duration(seconds: 1), (timer) => _fetchAlertData());
+    _setupFirebaseListener();
   }
 
   @override
   void dispose() {
-    _timer?.cancel();
+    _sensorSub?.cancel();
+    _alertsSub?.cancel();
     super.dispose();
   }
 
-  Future<void> _fetchAlertData() async {
-    try {
-      final response = await http.get(Uri.parse('http://192.168.4.1/data'));
+  void _setupFirebaseListener() {
+    final db = FirebaseDatabase.instance.ref();
 
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
+    // 1. Listen to permanently saved alerts from Firebase
+    _alertsSub = db.child('alerts').onValue.listen((event) {
+      if (event.snapshot.value != null) {
+        final data = Map<dynamic, dynamic>.from(event.snapshot.value as Map);
+        List<Map<String, dynamic>> tempAlerts = [];
+
+        data.forEach((key, value) {
+          var alertData = Map<String, dynamic>.from(value as Map);
+          alertData['key'] = key; // Save the unique database ID so we can delete it later
+          tempAlerts.add(alertData);
+        });
+
+        // Sort so the newest alerts appear at the top
+        tempAlerts.sort((a, b) => (b['timestamp'] ?? 0).compareTo(a['timestamp'] ?? 0));
+
+        if (mounted) {
+          setState(() {
+            _persistentAlerts = tempAlerts;
+          });
+        }
+      } else {
+        if (mounted) {
+          setState(() {
+            _persistentAlerts = [];
+          });
+        }
+      }
+    });
+
+    // 2. Listen to live sensors to trigger alerts
+    _sensorSub = db.child('sensors/current').onValue.listen((event) {
+      if (event.snapshot.value != null) {
+        final data = Map<String, dynamic>.from(event.snapshot.value as Map);
+
         setState(() {
-          flowA1 = (data['flow_a1'] ?? 0.0 as num).toDouble();
-          flowA2 = (data['flow_a2'] ?? 0.0 as num).toDouble();
-          flowB1 = (data['flow_b1'] ?? data['flow_2_1'] ?? 0.0 as num).toDouble();
-          flowB2 = (data['flow_b2'] ?? data['flow_2_2'] ?? 0.0 as num).toDouble();
-
-          turbStatus = (data['turbidity_status'] ?? 'AWAITING DATA') as String;
-          tdsStatus = (data['tds_status'] ?? 'AWAITING DATA') as String;
-          tdsPPM = (data['tds_ppm'] ?? 0 as num).toInt();
-
+          flowA1 = (data['flow_a1'] ?? 0.0).toDouble();
+          flowA2 = (data['flow_a2'] ?? 0.0).toDouble();
+          flowB1 = (data['flow_b1'] ?? 0.0).toDouble();
+          flowB2 = (data['flow_b2'] ?? 0.0).toDouble();
+          turbStatus = (data['turbidity_status'] ?? 'AWAITING DATA').toString();
+          tdsStatus = (data['tds_status'] ?? 'AWAITING DATA').toString();
+          tdsPPM = (data['tds_ppm'] ?? 0).toInt();
           isOnline = true;
+
+          _evaluatePersistentAlerts();
         });
       }
-    } catch (e) {
-      setState(() {
-        isOnline = false;
-      });
+    }, onError: (error) {
+      setState(() => isOnline = false);
+    });
+  }
+
+  void _evaluatePersistentAlerts() {
+    // Restored the missing subtraction operators (-)
+    bool isLeakingA = flowA1 > 0 && (flowA1 - flowA2) > leakThreshold;
+    if (isLeakingA && !_alertExists('LEAK-A')) {
+      double loss = flowA1 - flowA2;
+      _addAlertToLog('LEAK-A', 'FS-02 / FS-03', 'CRITICAL', 'Pipeline leakage detected in Branch A: -${loss.toStringAsFixed(1)} mL/s', const Color(0xFFFF1744));
+    }
+
+    bool isLeakingB = flowB1 > 0 && (flowB1 - flowB2) > leakThreshold;
+    if (isLeakingB && !_alertExists('LEAK-B')) {
+      double loss = flowB1 - flowB2;
+      _addAlertToLog('LEAK-B', 'FS-04 / FS-05', 'CRITICAL', 'Pipeline leakage detected in Branch B: -${loss.toStringAsFixed(1)} mL/s', const Color(0xFFFF1744));
+    }
+
+    if (turbStatus == 'HIGHLY TURBID' && !_alertExists('WQ-TURB-HIGH')) {
+      _addAlertToLog('WQ-TURB-HIGH', 'SN-001', 'CRITICAL', 'Turbidity critical: Highly Turbid water detected', const Color(0xFFFF1744));
     }
   }
 
-  // Generate dynamic alert rows based on current system conditions
-  List<DataRow> _generateActiveAlerts() {
+  bool _alertExists(String id) {
+    return _persistentAlerts.any((alert) => alert['id'] == id);
+  }
+
+  void _addAlertToLog(String id, String sensor, String severity, String msg, Color severityColor) {
+    final now = DateTime.now();
+    final dateStr = "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}";
+    final timeStr = "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}";
+
+    // PUSH TO FIREBASE: This permanently saves the alert to the database
+    FirebaseDatabase.instance.ref().child('alerts').push().set({
+      'id': id,
+      'date': dateStr,
+      'time': timeStr,
+      'sensor': sensor,
+      'severity': severity,
+      'msg': msg,
+      'color': severityColor.value, // Save color as an integer
+      'timestamp': ServerValue.timestamp, // Server time for accurate sorting
+    });
+  }
+
+  void _dismissAlert(String key) {
+    // REMOVE FROM FIREBASE: Deletes the alert forever when operator clicks INSPECT
+    FirebaseDatabase.instance.ref().child('alerts/$key').remove();
+  }
+
+  List<DataRow> _generateTableRows() {
     List<DataRow> rows = [];
-    String timeNow = "${DateTime.now().hour.toString().padLeft(2, '0')}:${DateTime.now().minute.toString().padLeft(2, '0')}:${DateTime.now().second.toString().padLeft(2, '0')}";
 
     if (!isOnline) {
-      rows.add(_buildAlertRow('SYS-ERR', timeNow, 'CORE-ESP32', 'CRITICAL', 'Connection lost to main sensor hub', const Color(0xFFFF1744)));
+      rows.add(_buildSingleRow(
+        id: 'SYS-ERR',
+        dateTimeWidget: const Text('--:--', style: TextStyle(color: Colors.redAccent)),
+        sensor: 'CORE-ESP32',
+        severity: 'CRITICAL',
+        msg: 'Connection lost to main sensor hub',
+        severityColor: const Color(0xFFFF1744),
+        actionWidget: const SizedBox(),
+      ));
       return rows;
     }
 
-    // 1. Leak Detection: Branch A
-    if (flowA1 > 0 && (flowA1 - flowA2) > leakThreshold) {
-      double loss = flowA1 - flowA2;
-      rows.add(_buildAlertRow('LEAK-A', timeNow, 'FS-02 / FS-03', 'CRITICAL', 'Pipeline leakage detected in Branch A: -${loss.toStringAsFixed(1)} mL/s', const Color(0xFFFF1744)));
+    if (_persistentAlerts.isEmpty) {
+      final now = DateTime.now();
+      final dateStr = "${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}";
+      final timeStr = "${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}";
+
+      rows.add(_buildSingleRow(
+        id: 'SYS-OK',
+        dateTimeWidget: Text(
+            "$dateStr   $timeStr",
+            style: const TextStyle(color: Colors.blueGrey, fontFamily: 'monospace')
+        ),
+        sensor: 'ALL-NODES',
+        severity: 'NOMINAL',
+        msg: 'System operating within normal parameters. All branches cleared.',
+        severityColor: const Color(0xFF00E676),
+        actionWidget: const SizedBox(),
+      ));
+      return rows;
     }
 
-    // 2. Leak Detection: Branch B
-    if (flowB1 > 0 && (flowB1 - flowB2) > leakThreshold) {
-      double loss = flowB1 - flowB2;
-      rows.add(_buildAlertRow('LEAK-B', timeNow, 'FS-04 / FS-05', 'CRITICAL', 'Pipeline leakage detected in Branch B: -${loss.toStringAsFixed(1)} mL/s', const Color(0xFFFF1744)));
-    }
-
-    // 3. Water Quality: Turbidity
-    if (turbStatus == 'SLIGHTLY TURBID') {
-      rows.add(_buildAlertRow('WQ-TURB', timeNow, 'SN-001', 'WARNING', 'Turbidity elevated: Slightly Turbid water detected', const Color(0xFFFFB300)));
-    } else if (turbStatus == 'HIGHLY TURBID') {
-      rows.add(_buildAlertRow('WQ-TURB', timeNow, 'SN-001', 'CRITICAL', 'Turbidity critical: Highly Turbid water detected', const Color(0xFFFF1744)));
-    }
-
-    // 4. Water Quality: TDS / PPM
-    if (tdsStatus == 'FAIR') {
-      rows.add(_buildAlertRow('WQ-TDS', timeNow, 'SN-002', 'WARNING', 'Conductivity warning: Water quality is FAIR ($tdsPPM ppm)', const Color(0xFFFFB300)));
-    } else if (tdsStatus == 'POOR') {
-      rows.add(_buildAlertRow('WQ-TDS', timeNow, 'SN-002', 'CRITICAL', 'Conductivity critical: Water quality is POOR ($tdsPPM ppm)', const Color(0xFFFF1744)));
-    }
-
-    // 5. System Nominal Fallback
-    if (rows.isEmpty && isOnline) {
-      rows.add(_buildAlertRow('SYS-OK', timeNow, 'ALL-NODES', 'NOMINAL', 'System operating within normal parameters. No active alerts.', const Color(0xFF00E676)));
+    // Map the database alerts into the table UI
+    for (int i = 0; i < _persistentAlerts.length; i++) {
+      var alert = _persistentAlerts[i];
+      rows.add(
+          _buildSingleRow(
+            id: alert['id'],
+            dateTimeWidget: Text(
+              "${alert['date']}   ${alert['time']}",
+              style: const TextStyle(color: Colors.redAccent, fontWeight: FontWeight.bold, fontFamily: 'monospace'),
+            ),
+            sensor: alert['sensor'],
+            severity: alert['severity'],
+            msg: alert['msg'],
+            severityColor: Color(alert['color'] as int), // Restore the saved color
+            actionWidget: TextButton.icon(
+              // Trigger deletion from Firebase using the unique key
+              onPressed: () => _dismissAlert(alert['key']),
+              icon: const Icon(Icons.playlist_add_check_circle_rounded, color: Colors.greenAccent, size: 18),
+              label: const Text("INSPECT", style: TextStyle(color: Colors.greenAccent, fontSize: 11, fontWeight: FontWeight.bold)),
+            ),
+          )
+      );
     }
 
     return rows;
+  }
+
+  DataRow _buildSingleRow({required String id, required Widget dateTimeWidget, required String sensor, required String severity, required String msg, required Color severityColor, required Widget actionWidget}) {
+    return DataRow(
+      cells: [
+        DataCell(Text(id, style: const TextStyle(fontFamily: 'monospace', color: Colors.blueGrey))),
+        DataCell(dateTimeWidget),
+        DataCell(Text(sensor, style: const TextStyle(color: Color(0xFF00A3FF), fontWeight: FontWeight.bold))),
+        DataCell(Row(
+          children: [
+            Container(width: 6, height: 6, decoration: BoxDecoration(color: severityColor, shape: BoxShape.circle)),
+            const SizedBox(width: 8),
+            Text(severity, style: TextStyle(color: severityColor, fontWeight: FontWeight.bold, fontSize: 11)),
+          ],
+        )),
+        DataCell(Text(msg, style: TextStyle(color: severityColor == const Color(0xFF00E676) ? Colors.blueGrey : Colors.white))),
+        DataCell(actionWidget),
+      ],
+    );
   }
 
   @override
@@ -116,7 +230,9 @@ class _AlertsViewState extends State<AlertsView> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('ALERT SYSTEM MONITOR LOG', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 1)),
+          const Text('PIPELINE INSPECTION & ALERT LOGS', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, letterSpacing: 1)),
+          const SizedBox(height: 8),
+          const Text('Alerts are securely logged to the cloud and remain visible until physically inspected and cleared by an operator.', style: TextStyle(fontSize: 11, color: Colors.blueGrey)),
           const SizedBox(height: 20),
           Expanded(
             child: Container(
@@ -131,36 +247,19 @@ class _AlertsViewState extends State<AlertsView> {
                   headingRowColor: WidgetStateProperty.all(const Color(0xFF09111A)),
                   columns: const [
                     DataColumn(label: Text('ID', style: TextStyle(color: Colors.grey))),
-                    DataColumn(label: Text('TIMESTAMP', style: TextStyle(color: Colors.grey))),
+                    DataColumn(label: Text('DATE & TIME', style: TextStyle(color: Colors.grey))),
                     DataColumn(label: Text('NODE SENSOR', style: TextStyle(color: Colors.grey))),
                     DataColumn(label: Text('SEVERITY', style: TextStyle(color: Colors.grey))),
                     DataColumn(label: Text('LOG TRANSMISSION MESSAGE', style: TextStyle(color: Colors.grey))),
+                    DataColumn(label: Text('ACTION', style: TextStyle(color: Colors.grey))),
                   ],
-                  rows: _generateActiveAlerts(),
+                  rows: _generateTableRows(),
                 ),
               ),
             ),
           )
         ],
       ),
-    );
-  }
-
-  DataRow _buildAlertRow(String id, String time, String sensor, String severity, String msg, Color severityColor) {
-    return DataRow(
-      cells: [
-        DataCell(Text(id, style: const TextStyle(fontFamily: 'monospace', color: Colors.blueGrey))),
-        DataCell(Text(time, style: const TextStyle(fontFamily: 'monospace'))),
-        DataCell(Text(sensor, style: const TextStyle(color: Color(0xFF00A3FF), fontWeight: FontWeight.bold))),
-        DataCell(Row(
-          children: [
-            Container(width: 6, height: 6, decoration: BoxDecoration(color: severityColor, shape: BoxShape.circle)),
-            const SizedBox(width: 8),
-            Text(severity, style: TextStyle(color: severityColor, fontWeight: FontWeight.bold, fontSize: 11)),
-          ],
-        )),
-        DataCell(Text(msg, style: TextStyle(color: severityColor == const Color(0xFF00E676) ? Colors.blueGrey : Colors.white))),
-      ],
     );
   }
 }
